@@ -1,0 +1,829 @@
+## The following R code is for  model 3 when n is 1000 and p is 10 in the manuscript 
+##` `Partial Recovery of Causal Directed Acyclic Graph Using All Sufficient Adjustment Sets''. 
+## By running this code,  the indexes defined in equation (5) and (6) can be derived.
+## The R codes for other settings can be similarly derived. 
+## If you have any questions, please contact Qin Fei via 15717413159@163.com.
+
+
+
+rm(list=ls())
+
+library(MASS)
+library(dr)
+library(dagitty)
+library(Matrix)
+library(bnlearn)
+
+
+## To reduce the memory, we use 0,1,2,...,2^(p-1) to encode the 2^p subsets of {1,...,p}. For each candidate subset, it can be naturally encoded 
+## as a vector of length p containing binary indicators of whether 
+## including each covariate, e.g, when p=3, we can use (1,0,0) to denote the candidate set {X1} and (0,1,1) to denote {X2,X3}. 
+## Then we can transform the p-dimensional binary vector to its decimal representation.
+## e.g. when p=3, we can transform (1,0,0) to 0*2^0+0*2^1+1*2^2. We use 0 or 2^p to encode the empty set.   
+
+
+
+## transform a decimal number   
+## to the binary representation (a vector of length p with 0/1 elements)                                       
+
+decimal2binary <- function (x, length) 
+{
+  b <- if (missing(length)) 
+    NULL
+  else rep(0, length)
+  i <- 0
+  while (x >= 1) {
+    i <- i + 1
+    b[i] <- x%%2
+    x <- x%/%2
+  }
+  return(rev(b))
+}
+
+
+## transform a candidate set  
+##  to the  decimal representation                                      
+
+activeset2decimal <- function(set,dimcov)
+{
+  decimalvalue <- 0
+  for (i in 1:length(set)) {decimalvalue <- decimalvalue+2^(dimcov-set[i])}
+  return(decimalvalue)
+}
+
+
+
+##   transform a decinal number   
+##   to the set representation                                        
+
+decimal2set <- function(number,covdim)
+{
+  binaryvalue <- decimal2binary(number,covdim)   
+  current_set <- which(binaryvalue==1)
+  return(current_set)
+}
+
+
+
+## to find the local minimum sets of A (a vector of decimal numbers, each number represents a set).
+
+find_local_min_sets <- function(A,dim_cov) {
+  local_min_sets <- c()
+  if(is.element(2^dim_cov,A)|is.element(0,A)) {local_min_sets <- c(local_min_sets,0)} else{
+    if(length(A)==1) {local_min_sets <- c(local_min_sets,A)} else { 
+      # Iterate over each set in the collection
+      for (i in 1:length(A)) {
+        
+        binaryvalue <- decimal2binary(A[i],dim_cov)   
+        current_set <- which(binaryvalue==1)
+        
+        if(length(current_set)==1) {local_min_sets <- c(local_min_sets, activeset2decimal(current_set,dim_cov))}
+        # Generate all proper subsets of the current set
+        if(length(current_set)>1){
+          is_local_min <- TRUE
+          proper_subsets <- lapply(1:(length(current_set) - 1), function(n) {
+            return(combn(current_set, n, simplify = FALSE))
+          })
+          proper_subsets <- unlist(proper_subsets, recursive = FALSE)
+          # Check if any proper subset is in the collection
+          for (j in 1:length(proper_subsets)) {
+            if(is.element(activeset2decimal(proper_subsets[[j]],dim_cov), A)){
+              is_local_min <- FALSE
+              break
+            }
+          }
+          # If no proper subset is in the collection, add the current set to the local minimum sets
+          if (is_local_min) {
+            local_min_sets <- c(local_min_sets, activeset2decimal(current_set,dim_cov))
+          }
+        }
+      }
+    }}
+  return(unique(local_min_sets))
+}
+
+
+
+##Given B and XCOF,  find all C such that B \subset C \subset XCOVF (C not equal B). XCOVF is 1:10 for example. Bdecimal is a number, decimal representation of a set B. 
+
+generate_supersets <- function(XCOVF,dim_cov,Bdecimal) {
+  if (Bdecimal==2^dim_cov) {Bdecimal <- 0}
+  
+  binaryvalue <- decimal2binary(Bdecimal,dim_cov)   
+  B <- which(binaryvalue==1)
+  # Check if B is a subset of XCOVF,applicable to empty set B
+  if (!all(B %in% XCOVF)) {
+    stop("B is not a subset of XCOVF.")
+  }
+  
+  # Find the elements in XCOVF that are not in B, 
+  diff_elements <- setdiff(XCOVF, B)
+  
+  if(length(diff_elements)==0) {supersets_decimal <- c(activeset2decimal(XCOVF,dim_cov))} 
+  if(length(diff_elements)==1) {supersets_decimal <-c(activeset2decimal(XCOVF,dim_cov)) } 
+  if(length(diff_elements)>1) {
+    supersets_decimal <- c()
+    # Generate all combinations of the different elements
+    combn_list <- lapply(1:length(diff_elements), function(n) {
+      return(combn(diff_elements, n, simplify = FALSE))
+    })
+    
+    # Add B to each combination to generate the sets C
+    C_sets <- lapply(unlist(combn_list, recursive = FALSE), function(set) {
+      return(sort(c(B, set)))
+    })
+    for (j in 1:length(C_sets)) {supersets_decimal[j] <- activeset2decimal(C_sets[[j]],dim_cov) }
+  }
+  return(supersets_decimal)
+}
+
+
+
+
+## the final result `collider' is a vector (Null, or length k vectors. k means finding k different collections of colliders on the same path). 
+##XMdecimal is a decimal number, XGC a vector. At is a vector, XCOF is a vector.
+## for each local minimum set XM (vector), find all its supersets not in At (denoted XGCL), and get the local minimum set of XGCL, denoted by XGC.
+## (XM,C1),(XM,C2)...
+
+find_collider <- function(XMdecimal,At,XCOVF,dim_cov){
+  if (XMdecimal==2^dim_cov) {XMdecimal <- 0}
+  XMbinaryvalue <- decimal2binary(XMdecimal,dim_cov)   
+  XM <- which(XMbinaryvalue==1)
+  if(length(XM)==length(XCOVF)) {collider <- NULL} else{
+    XGCL <- c()
+    superset_XM <- generate_supersets(XCOVF,dim_cov,XMdecimal)
+    for (j in 1:length(superset_XM)) {if(!(is.element(superset_XM[j], At)))  XGCL <- c(XGCL, superset_XM[j]) } #XGCL <- c(XGCL, list(superset_XM[[j]]))
+    if(length(XGCL)>=1) {XGC <- find_local_min_sets(XGCL,dim_cov)} else {XGC <- NULL}
+    
+    if (is.null(XGC)) {collider <- NULL} else {
+      collider <- c()
+      for (j in 1:length(XGC)){
+        XGCjbinaryvalue <- decimal2binary(XGC[j],dim_cov)   
+        XGCj <- which(XGCjbinaryvalue==1)
+        collider <- c(collider,activeset2decimal(setdiff(XGCj,XM),dim_cov)) 
+      }}}
+  if(length(collider)==0) {collider <- NULL}
+  return(collider)
+}
+
+
+## Algorithm 1: given some sets A_1, A_2,..., A_k, each time chose one element from each given set 
+## and put the chose elements together to form a new set, output all the possible sets. 
+## Finally for each derived set, remove the repeat element if any.
+## min_sets and the output paths are both a vector in decimal. 
+## for the output, each element of it represents a path in decimal.
+
+expand.grid.unique <- function(min_sets,dim_cov) {
+  if(is.element(0,min_sets)|is.element(2^dim_cov,min_sets)) {paths <- NULL} else{
+    list_of_sets <- list()
+    for (i in 1:length(min_sets))
+    {
+      binaryvalue <- decimal2binary(min_sets[i],dim_cov)   
+      current_set <- which(binaryvalue==1)
+      list_of_sets[[i]] <-current_set  
+    }
+    
+    # Create all possible combinations of elements from the sets
+    combinations <- expand.grid(list_of_sets)
+    
+    # Convert combinations to a list of lists (each sublist is a set)
+    list_of_combinations <- split(combinations, seq(nrow(combinations)))
+    
+    # Remove duplicates within each set and simplify back to a vector
+    unique_combinations <- lapply(list_of_combinations, function(set) {
+      activeset2decimal(unique(unlist(set)),dim_cov)
+    })
+    paths <- find_local_min_sets(unique(unname(unlist(unique_combinations))),dim_cov)
+  }
+  return(paths)
+}
+
+
+## colliderC is a number in decimal, representing collider(s) on the same path.
+## sasC is a vector, each element in decimal is a set paired with colliderC.
+## The final result contains path (including the colliders) in decimal.
+
+find_noncollider <- function(colliderC,sasC,At,dim_cov)
+{
+  pathCnoncollider <- c()
+  minsasC <-find_local_min_sets(sasC,dim_cov)
+  binaryvalue0 <- decimal2binary(colliderC,dim_cov)   
+  colliderCset <- which(binaryvalue0==1)
+  for (j in 1:length(minsasC))
+  {
+    binaryvalue1 <- decimal2binary(minsasC[j],dim_cov)   
+    minsasCsetj <- which(binaryvalue1==1)
+    setACj <-activeset2decimal(c(colliderCset,minsasCsetj),dim_cov)  
+    XDLj <- c()
+    superset_setACj <- generate_supersets(XCOVF,dim_cov,setACj)
+    for (jj in 1:length(superset_setACj)) 
+    {
+      if(is.element(superset_setACj[jj], At)) 
+      {
+        binaryvalue00 <- decimal2binary(superset_setACj[jj],dim_cov)   
+        superset_setACj00 <- which(binaryvalue00==1)
+        XDLj <- c(XDLj, activeset2decimal(setdiff(superset_setACj00,c(colliderCset,minsasCsetj)),dim_cov))
+      }
+    }
+    if(length(XDLj)>=1)
+    {
+      minXDLj <-find_local_min_sets(XDLj,dim_cov)
+      pathj <- expand.grid.unique(minXDLj,dim_cov)
+      pathjC <- c()
+      for (ii in 1:length(pathj))
+      {
+        binaryvaluepathj <- decimal2binary(pathj[ii],dim_cov)   
+        pathj_set <- which(binaryvaluepathj==1)
+        pathjC <- c(pathjC,activeset2decimal(c(pathj_set,colliderCset),dim_cov))
+      }
+      pathCnoncollider <- c(pathCnoncollider,pathjC) 
+    }
+  }
+  return(unique(pathCnoncollider))
+}
+
+##Used in the function find_proper_subset_pairs. This function first groups 
+##vectors by their first element and merges them. 
+##Then it iterates over these grouped vectors to remove duplicate elements
+##while keeping the first element intact. 
+
+merge_vectors_unique <- function(list_of_vectors) {
+  # Create an empty list to store the intermediate grouping results
+  temp_list <- list()
+  
+  # Iterate over each vector in the input list
+  for (vec in list_of_vectors) {
+    # Use the first element of the vector as the key
+    key <- as.character(vec[1])
+    
+    # If the key exists, merge and remove duplicates, otherwise create a new entry
+    if (!is.null(temp_list[[key]])) {
+      # Merge while excluding the first element of the current vector
+      temp_list[[key]] <- c(temp_list[[key]], vec[-1])
+    } else {
+      # Add the complete vector as a new entry
+      temp_list[[key]] <- vec
+    }
+  }
+  
+  # Create a final list to store unique elements
+  final_list <- list()
+  
+  # Iterate over the grouped list to remove duplicates while preserving the first element
+  for (key in names(temp_list)) {
+    # Extract the vector associated with the key
+    vec <- temp_list[[key]]
+    # Remove duplicates while preserving the order and the first element
+    vec_unique <- c(vec[1], unique(vec[-1]))
+    # Assign the unique vector back to the final list
+    final_list[[key]] <- vec_unique
+  }
+  
+  # Return the final list with unique elements
+  return(final_list)
+}
+
+##Used in the function find_proper_subset_pairs.
+## finds all the pairs (A, B) where A is a proper subset of B. 
+##It then returns the positions of these pairs as (i, j), 
+##where i is the position of A in the list and j is the position of B.
+
+find_proper_subset_pairs <- function(list_of_sets) {
+  # Initialize a list to store the positions of the proper subset pairs
+  proper_subset_pairs <- list()
+  
+  # Get the length of the list of sets
+  num_sets <- length(list_of_sets)
+  
+  # Compare each set with every other set
+  for (i in 1:(num_sets - 1)) {
+    for (j in (i + 1):num_sets) {
+      # Check if set i is a proper subset of set j
+      if (all(list_of_sets[[i]] %in% list_of_sets[[j]]) && length(list_of_sets[[i]]) < length(list_of_sets[[j]])) {
+        proper_subset_pairs <- c(proper_subset_pairs, list(c(i, j)))
+      }
+      # Check if set j is a proper subset of set i
+      if (all(list_of_sets[[j]] %in% list_of_sets[[i]]) && length(list_of_sets[[j]]) < length(list_of_sets[[i]])) {
+        proper_subset_pairs <- c(proper_subset_pairs, list(c(j, i)))
+      }
+    }
+  }
+  
+  # Return the list of positions of proper subset pairs
+  return(proper_subset_pairs)
+}
+
+
+## Given the CASAS At, output all the paths in decimal.
+
+find_allpaths <- function(At,dim_cov)
+{
+  colliders <- c();colliderpaths <- c()
+  ## find all local minimum sets and paths formed by them
+  minsets <-find_local_min_sets(At,dim_cov)
+  minset_paths <-expand.grid.unique(minsets,dim_cov)
+  
+  ## find all qualified pairs
+  colliderAlist <- list()
+  for (i in 1:length(At))
+  {
+    collideri <- find_collider(At[i],At,XCOVF,dim_cov)
+    if(length(collideri)==1) {colliderAlist <- c(colliderAlist,list(c(collideri,At[i])))}
+    if(length(collideri)>1)
+    {
+      for (j in 1:length(collideri)){colliderAlist <- c(colliderAlist,list(c(collideri[j],At[i])))}
+    }
+  }
+  
+  if (length(colliderAlist)==0){minsetpaths <- minset_paths} else 
+  {
+    minsetpaths <- minset_paths
+    colliderAmergelist <- merge_vectors_unique(colliderAlist)
+    for (ii in 1: length(colliderAmergelist)) 
+    {
+      colliderpath <- find_noncollider(colliderAmergelist[[ii]][1],colliderAmergelist[[ii]][-1],At,dim_cov)
+      colliderpaths <- c(colliderpaths,colliderpath)
+      colliders <- c(colliders,rep(colliderAmergelist[[ii]][1],length(colliderpath)))
+    }
+    
+    if (length(colliders)>1)
+    {
+      ## step3 remove some fake sub-paths.
+      colliders_setlist <- list()
+      for (k in 1:length(colliders)) {colliders_setlist[[k]] <-decimal2set(colliders[k],dim_cov) }
+      colliderpairs <- find_proper_subset_pairs(colliders_setlist)
+      
+      if (length(colliderpairs)>0)
+      {
+        collider_removeindex <- c()
+        for (kk in 1:length(colliderpairs)) 
+        {
+          path1_index <-colliderpairs[[kk]][1];path2_index <-colliderpairs[[kk]][2]
+          path1_set <-decimal2set(colliderpaths[path1_index],dim_cov)
+          path2_set <-decimal2set(colliderpaths[path2_index],dim_cov)
+          if (all(path1_set %in% path2_set) && length(path1_set) < length(path2_set)) {collider_removeindex <- c(collider_removeindex,path1_index)}
+        }
+        if (length(collider_removeindex)>0)
+        {
+          colliders <- colliders[-collider_removeindex]
+          colliderpaths <-colliderpaths[-collider_removeindex] 
+        }
+      }
+    }
+    
+  }
+  
+  list(colliders=colliders,minsetpaths=minsetpaths,colliderpaths=colliderpaths)
+  
+}
+
+
+##  Compute Equation (6). pt=intersect(paths.est,paths.ture)/len(paths.ture),
+## pe=intersect(paths.est,paths.ture)/len(paths.est) 
+
+evaluation.index <- function(minsetpaths.true,colliders.true,colliderpaths.true,
+                             minsetpaths.est,colliders.est,colliderpaths.est)
+{
+  minlen <- length(intersect(minsetpaths.true,minsetpaths.est))
+  if (is.null(colliders.true)) 
+  {
+    pt <-minlen/length(minsetpaths.true) 
+    pe <-minlen/(length(minsetpaths.est)+length(colliders.est)) 
+  } else
+  {
+    colliderintersect <- intersect(colliders.true,colliders.est)
+    colliderlen <-length(colliderintersect)
+    if (colliderlen==0)
+    {
+      pt <-minlen/(length(minsetpaths.true)+length(colliders.true)) 
+      pe <-minlen/(length(minsetpaths.est)+length(colliders.est))
+    } else
+    {
+      colliinterturelen <- 0
+      for (i in 1:colliderlen)
+      {
+        collidertureindex <- which(colliders.true==colliderintersect[i])
+        colliderestindex <- which(colliders.est==colliderintersect[i])
+        colliinterturelen <- colliinterturelen+length(intersect(colliderpaths.est[colliderestindex],colliderpaths.true[collidertureindex]))
+      }
+      pt <-(minlen+colliinterturelen)/(length(minsetpaths.true)+length(colliders.true)) 
+      pe <-(minlen+colliinterturelen)/(length(minsetpaths.est)+length(colliders.est))
+    }
+  }
+  list(pt=pt,pe=pe)
+}
+
+
+
+### data generation function 
+
+data.gen<-function(N,k,dim_covF,mu0,sigma0,mu1,sigma1)
+{
+  
+  set.seed(k)
+  treat <- rbinom(N,size=1,prob=0.5)
+  Xtre<-round(mvrnorm(N, mu1, sigma1),3)
+  Xcon<-round(mvrnorm(N, mu0, sigma0),3)
+  cova<-Xtre*treat+Xcon*(1-treat)
+  y0 <- y1 <- y <- c()
+  mean_eps <- rep(0,4)
+  sigma_eps <-diag(0.25,4)
+  eps<-round(mvrnorm(N, mean_eps,sigma_eps),3)
+  eps0 <- eps[,1];eps1 <- eps[,2];eps2 <- eps[,3];eps3 <- eps[,4]
+  X1 <- cova[,1];X3 <- cova[,2];X5 <- cova[,3];X6 <- cova[,4];X7 <- cova[,5]
+  X8 <- cova[,6];X9 <- cova[,7];X10 <- cova[,8]
+  X2 <-2*X1+3*X3+eps2;
+  X4<-1*X5+2*X3+eps3
+  for(i in 1:N)
+  {
+    y0[i] <- 4*(X1[i]+0.3*(X6[i]+X7[i]+X8[i]+X9[i]))+eps0[i]  ## 2,3
+    y1[i] <- 2*((X1[i])+0.4*(X6[i]+sin(X7[i])+X8[i]+X9[i]))+eps1[i] ## better .78 .93
+  }
+  y <- treat*y1+(1-treat)*y0
+  cbind(X1,X2,X3,X4,X5,X6,X7,X8,X9,X10,treat,y0,y1,y)
+}
+
+nsamp <- 1000 ## sample size
+nr <-500  ## repeat time
+dim_covF <-10
+mu0 <-rep(0,(dim_covF-2)) 
+mu1 <-c(0,0,1,rep(0,(dim_covF-5)))
+sigma0 <-diag(1,(dim_covF-2))
+sigma1 <-sigma0
+covx <- diag(1,dim_covF)
+covx[1,2] <- covx[2,1] <- 2;covx[3,2] <- covx[2,3] <-3
+covx[4,5] <- covx[5,4] <- 1;covx[4,3] <- covx[3,4] <-2
+covx[4,4] <- 5.25;covx[2,2] <-13.25
+covx[4,2] <- covx[2,4] <- 6
+covx0 <- covx1 <- covx
+
+
+
+Xindex_true <- 1:9
+Iden.mat_true <- diag(1,length(Xindex_true))
+MY0_true <-Iden.mat_true[,c(1,6,7,8,9)]  
+MY1_true <- Iden.mat_true[,c(1,6,7,8,9)]
+MT_true <- Iden.mat_true[,c(5)]
+covx0_true <- covx1_true <- covx[1:9,1:9]
+
+
+## the slicing function used for sliced inverse regression
+
+slicing<-function(y,H) 
+{
+  n<-length(y)
+  if (length(levels(as.factor(y)))>H)
+  {
+    ytilde<-rep(0,H+1)
+    ytilde[1]<-min(y)
+    for (h in 1:(H-1))
+    {
+      ytilde[h+1]<-quantile(y,h/H)
+      ytilde[h+1]<-max(y[y<=ytilde[h+1]]) 
+      if (ytilde[h+1]==ytilde[h]) ytilde[h+1]=min(y[y>ytilde[h]])
+    }  
+  }
+  if (length(levels(as.factor(y)))<=H)
+  {
+    H <- length(levels(as.factor(y))) 
+    ytilde<-rep(0,H+1)
+    ytilde[1]=min(y)
+    for (h in 1:(H-1))
+    {
+      ytilde[h+1]<-min(y[y>ytilde[h]])
+    }
+  } 
+  ytilde[H+1]=max(y)+1
+  prop<-rep(1,H)
+  for (i in 1:H)
+  {
+    prop[i] = sum((y >= ytilde[i])&(y < ytilde[i+1]))/n
+  }
+  res<-list()
+  res$H<-H
+  res$ytilde<-ytilde
+  res$prop<-prop
+  return(res)
+}
+
+
+### the sliced inverse regression estimator
+
+sir_phl<-function(X,Y,H)
+{
+  p<-ncol(X)
+  n<-nrow(X)
+  X<-as.matrix(X,n,)
+  
+  YS<-slicing(Y,H)
+  Hy<-YS$H
+  ytilde<-YS$ytilde
+  my<-matrix(0,p,Hy)
+  XA1<-t(t(X)-apply(X,2,mean))
+  
+  for (h in 1:Hy)
+  {
+    
+    if (sum((Y>=ytilde[h])&(Y<ytilde[h+1]))>1)
+    {my[,h]<-apply(XA1[(Y>=ytilde[h])&(Y<ytilde[h+1]),],2,mean)}
+    else{my[,h]<-XA1[(Y>=ytilde[h])&(Y<ytilde[h+1]),]}
+  }
+  
+  
+  list(my=my)
+}
+
+
+
+## find X_E defined in Section 5 based on Proposition 7 
+
+find2_type3X <- function(mydata)
+{
+  
+  type3Xcandi <- colnames(mydata[,(1:dim_covF)]) 
+  type3X <-type3Xcandi 
+  
+  consetname0 <-type3Xcandi
+  for (i in 1:length(type3Xcandi))
+  { 
+    stopv = FALSE 
+    if (ci.test(x = type3Xcandi[i] , y = "treat", data = as.data.frame(mydata))$p.value<0.05)
+    {
+      type3X <- setdiff(type3X,type3Xcandi[i])
+      next
+    }
+    consetname <-setdiff(consetname0,type3Xcandi[i])
+    
+    if(length(consetname)==0) {next}
+    
+    for (j in 1:min(3,length(consetname)))
+    {
+      conAA <- combn(consetname,j)
+      len.conAA <- ncol(conAA)
+      for (k in 1:len.conAA)
+      {
+        if (ci.test(x = type3Xcandi[i] , y = "treat", z =conAA[,k], data = as.data.frame(mydata))$p.value<0.05)
+        {
+          type3X <- setdiff(type3X,type3Xcandi[i])
+          stopv = TRUE
+          break
+        }
+        
+      }
+      if (stopv) {break}
+    }
+    if (!stopv) {consetname0 <-setdiff(consetname0,type3Xcandi[i])}
+  }
+  return(type3X)
+}
+
+
+
+##input: activeset1(in decimal dimcov1, a vector),type3X_index (a vector, eg:c(3,5,6))
+##output:a vector in decimal dimcov
+## to combine activeset1 with all subsets of type3X_index, e.g. line 7 of Algorithm 3
+
+combinetype3 <- function(activeset1,dimcov1,type3X_index,dimcov)
+{ 
+  if (length(type3X_index)==0) {activeset1new <-activeset1} else{
+    
+    activeset1new <- c()
+    if (dimcov1==dimcov) {activeset1new <-activeset1 } else
+    {
+      for (ii in 1: length(activeset1)) 
+      { if(activeset1[ii]==0) {activeset1new[ii] <- 0} else {
+        activeset1new[ii] <-activeset2decimal(decimal2set(activeset1[ii],dimcov1),dimcov) } 
+      }}
+    
+    if(length(type3X_index)==1)
+    {
+      for (kk in 1: length(activeset1))
+      {
+        activeset1new <- c(activeset1new,activeset2decimal(c(decimal2set(activeset1[kk],dimcov1),type3X_index),dimcov))
+      } 
+    } else 
+    {
+      for (i in 1:length(type3X_index))
+      {
+        AAA <- combn(type3X_index,i)
+        len.AAA <- ncol(AAA)
+        for (jj in 1:len.AAA)
+        {
+          for (k in 1: length(activeset1))
+          {
+            activeset1new <- c(activeset1new,activeset2decimal(c(decimal2set(activeset1[k],dimcov1),AAA[,jj]),dimcov))
+          }
+        }
+      } 
+    }
+  }
+  return(activeset1new)
+}
+
+
+
+### to compute equation (2) in this paper
+
+compute_fAt <- function(Xindex,MY0.est,MY1.est,MT.est,covx0.est,covx1.est)
+{
+  k0e <- 0
+  f0.est <- c()
+  f1.est <- c()
+  candidatedecimal <- c()
+  dim0 <- length(Xindex)
+  Iden.mat0 <- diag(1,dim0)
+  dim_decimal <- max(Xindex)
+  for (ii in 1:dim0) 
+  {
+    AA <- combn(dim0,ii)
+    len.AA <- ncol(AA)
+    for (jj in 1:len.AA)
+    {
+      index <- AA[,jj] 
+      IA <- Iden.mat0[,index]
+      IAC <- Iden.mat0[,-index]
+      ML0.est0 <- (t(MY0.est)%*%IAC)%*%(t(IAC)%*%covx0.est%*%IA)%*%solve(t(IA)%*%covx0.est%*%IA)%*%(t(IA)%*%covx0.est%*%IAC)%*%(t(IAC)%*%MT.est) 
+      MR0.est0 <- (t(MY0.est)%*%IAC)%*%(t(IAC)%*%covx0.est%*%IAC)%*%(t(IAC)%*%MT.est)
+      ML0.est1 <- (t(MY0.est)%*%IAC)%*%(t(IAC)%*%covx1.est%*%IA)%*%solve(t(IA)%*%covx1.est%*%IA)%*%(t(IA)%*%covx1.est%*%IAC)%*%(t(IAC)%*%MT.est) 
+      MR0.est1 <- (t(MY0.est)%*%IAC)%*%(t(IAC)%*%covx1.est%*%IAC)%*%(t(IAC)%*%MT.est)
+      f0.est[jj+k0e] <- 1*((svd(ML0.est0-MR0.est0)$d)[1]+ (svd(ML0.est1-MR0.est1)$d)[1]) 
+      candidatedecimal[jj+k0e] <- activeset2decimal(Xindex[index],dim_decimal)
+      
+      ML1.est1 <- (t(MY1.est)%*%IAC)%*%(t(IAC)%*%covx1.est%*%IA)%*%solve(t(IA)%*%covx1.est%*%IA)%*%(t(IA)%*%covx1.est%*%IAC)%*%(t(IAC)%*%MT.est) 
+      MR1.est1 <- (t(MY1.est)%*%IAC)%*%(t(IAC)%*%covx1.est%*%IAC)%*%(t(IAC)%*%MT.est)
+      ML1.est0 <- (t(MY1.est)%*%IAC)%*%(t(IAC)%*%covx0.est%*%IA)%*%solve(t(IA)%*%covx0.est%*%IA)%*%(t(IA)%*%covx0.est%*%IAC)%*%(t(IAC)%*%MT.est) 
+      MR1.est0 <- (t(MY1.est)%*%IAC)%*%(t(IAC)%*%covx0.est%*%IAC)%*%(t(IAC)%*%MT.est)
+      f1.est[jj+k0e] <- 1*((svd(ML1.est1-MR1.est1)$d)[1]+(svd(ML1.est0-MR1.est0)$d)[1])
+      
+    }
+    k0e <- k0e+len.AA
+  }
+  f0.est[2^dim0] <-(svd(t(MY0.est)%*%covx0.est%*%MT.est)$d)[1]+(svd(t(MY0.est)%*%covx1.est%*%MT.est)$d)[1] 
+  f1.est[2^dim0] <-(svd(t(MY1.est)%*%covx0.est%*%MT.est)$d)[1]+(svd(t(MY1.est)%*%covx1.est%*%MT.est)$d)[1]  
+  candidatedecimal[2^dim0] <- 0
+ 
+  
+  list(f0.est=f0.est,f1.est=f1.est,candidatedecimal=candidatedecimal)
+}
+
+## to obtain the true mathcal{A}_t
+
+fAt_true <-compute_fAt(Xindex_true,MY0_true,MY1_true,MT_true,covx0_true,covx1_true) 
+f0.true <-fAt_true$f0.est;f1.true <-fAt_true$f1.est
+activeset_candi0 <-activeset_candi1 <- fAt_true$candidatedecimal
+activeset0.index <- activeset_candi0[which(f0.true==0)] ## a vector in decimal dim(len(Xindex_true))
+activeset1.index <- activeset_candi1[which(f1.true==0)]
+
+
+p0.true <- c();p0.est <- c()
+p1.true <- c();p1.est <- c()
+p0.trueF <- c();p0.estF <- c()
+p1.trueF <- c();p1.estF <- c()
+pt0vec <-pe0vec <-pt1vec <-pe1vec <-rep(0,nr)   
+
+
+## run for nr times
+
+for (kk in 1:nr)
+{
+  data1 <- data.gen(nsamp,kk,dim_covF,mu0,sigma0,mu1,sigma1)
+  tre.index <- which(data1[,(dim_covF+1)]==1)
+  con.index <- which(data1[,(dim_covF+1)]==0)
+  nsamp.tre <- length(tre.index)
+  nsamp.con <- length(con.index)
+  type3Xname.est <- find2_type3X(data1)  ## X_E
+  Xnames <- colnames(data1[,1:dim_covF])
+  type12Xname.est <- setdiff(Xnames,type3Xname.est)
+  type12Xindex <- match(type12Xname.est,Xnames)
+  XCOVF <-type12Xindex 
+  X0 <- data1[,type12Xname.est]
+  dim0.est <- dim(X0)[2]
+  Iden.mat0 <- diag(1,dim0.est)
+  covx.est <-cov(X0) 
+  covx0.est <-cov(X0[con.index,])
+  covx1.est <-cov(X0[tre.index,])
+  
+  MY0.est<- solve(covx0.est)%*%(sir_phl(X0[con.index,],data1[con.index,(dim_covF+4)],5)$my)
+  MY1.est<- solve(covx1.est)%*%(sir_phl(X0[tre.index,],data1[tre.index,(dim_covF+4)],5)$my)
+  MT.est<-solve(covx.est)%*%(sir_phl(X0,data1[,(dim_covF+1)],2)$my)
+  
+  fAt_est <-compute_fAt(type12Xindex,MY0.est,MY1.est,MT.est,covx0.est,covx1.est)
+  
+  f0.est1 <-fAt_est$f0.est;f1.est1 <-fAt_est$f1.est
+  candidate0decimal <-candidate1decimal <- fAt_est$candidatedecimal
+  
+  sort.f0.est <- sort(f0.est1,decreasing = T)
+  ratio03 <- c()
+  cn03 <- 0.2*(log(nsamp))/sqrt(nsamp) 
+  for (i in 1:(length(sort.f0.est)-1)) {ratio03[i] <-(sort.f0.est[i+1]+cn03)/(sort.f0.est[i]+cn03) } ## equation (3) in this paper
+  r03.est <- which(ratio03==min(ratio03))
+  activesetindexest0.index <- which(f0.est1<sort.f0.est[r03.est])
+  activesetest0.indexpart <-candidate0decimal[activesetindexest0.index] ## in decimal in dim_cov
+  
+  
+  sort.f1.est <- sort(f1.est1,decreasing = T)
+  ratio13 <- c()
+  cn13 <- 0.2*(log(nsamp))/sqrt(nsamp) 
+  for (i in 1:(length(sort.f1.est)-1)) {ratio13[i] <-(sort.f1.est[i+1]+cn13)/(sort.f1.est[i]+cn13) }
+  r13.est <- which(ratio13==min(ratio13))
+  activesetindexest1.index <- which(f1.est1<sort.f1.est[r13.est])
+  activesetest1.indexpart <-candidate1decimal[activesetindexest1.index] ## in decimal in dim_cov
+  
+  
+  type12Xunion <- union(type12Xindex,Xindex_true)
+  dimcovunion <- max(type12Xunion)
+  activesetest0full.index <-combinetype3(activesetest0.indexpart,max(type12Xindex),setdiff(type12Xunion,type12Xindex),dimcovunion)
+  activeset0full.index <-combinetype3(activeset0.index,max(Xindex_true),setdiff(type12Xunion,Xindex_true),dimcovunion)
+  equalnum0 <- length(intersect(activesetest0full.index,activeset0full.index))
+  p0.true[kk] <- equalnum0/length(activeset0full.index)  
+  p0.est[kk] <- equalnum0/length(activesetest0full.index)
+  
+  activesetest1full.index <-combinetype3(activesetest1.indexpart,max(type12Xindex),setdiff(type12Xunion,type12Xindex),dimcovunion)
+  activeset1full.index <-combinetype3(activeset1.index,max(Xindex_true),setdiff(type12Xunion,Xindex_true),dimcovunion)
+  equalnum1 <- length(intersect(activesetest1full.index,activeset1full.index))
+  p1.true[kk] <- equalnum1/length(activeset1full.index)  
+  p1.est[kk] <- equalnum1/length(activesetest1full.index) 
+  
+  
+  
+  allpath0 <- find_allpaths(activesetest0.indexpart,max(type12Xindex))
+  
+  minsetpaths.true <-NULL
+  colliders.true <-activeset2decimal(c(2,4),max(max(type12Xindex),9))
+  colliderpaths.true<-activeset2decimal(c(1,2,3,4,5),max(max(type12Xindex),9))
+  
+  
+  minsetpaths.est0 <- c()
+  lenminsetpaths.est0 <- length(allpath0$minsetpaths)
+  if(lenminsetpaths.est0==0) {minsetpaths.est0 <- NULL} else{
+    
+    for (i in 1:lenminsetpaths.est0) 
+    {
+      minsetpaths.est0[i] <-activeset2decimal(decimal2set((allpath0$minsetpaths)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  colliders.est0 <- c()
+  lencolliders.est0 <- length(allpath0$colliders)
+  if(lencolliders.est0==0) {colliders.est0 <- NULL} else{
+    for (i in 1:lencolliders.est0) 
+    {
+      colliders.est0[i] <-activeset2decimal(decimal2set((allpath0$colliders)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  colliderpaths.est0 <- c()
+  lencolliderpaths.est0 <- length(allpath0$colliderpaths)
+  if(lencolliderpaths.est0==0) {colliderpaths.est0 <- NULL} else{
+    for (i in 1:lencolliderpaths.est0) 
+    {
+      colliderpaths.est0[i] <-activeset2decimal(decimal2set((allpath0$colliderpaths)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  evaluationresult0 <- evaluation.index(minsetpaths.true,colliders.true,colliderpaths.true,
+                                        minsetpaths.est0,colliders.est0,colliderpaths.est0)
+  pt0vec[kk] <-evaluationresult0$pt;pe0vec[kk] <-evaluationresult0$pe 
+  
+  
+  allpath1 <- find_allpaths(activesetest1.indexpart,max(type12Xindex))
+  
+  minsetpaths.est1 <- c()
+  lenminsetpaths.est1 <- length(allpath1$minsetpaths)
+  if(lenminsetpaths.est1==0) {minsetpaths.est1 <- NULL} else{
+    for (i in 1:lenminsetpaths.est1) 
+    {
+      minsetpaths.est1[i] <-activeset2decimal(decimal2set((allpath1$minsetpaths)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  colliders.est1 <- c()
+  lencolliders.est1<- length(allpath1$colliders)
+  if(lencolliders.est1==0) {colliders.est1 <- NULL} else{
+    for (i in 1:lencolliders.est1) 
+    {
+      colliders.est1[i] <-activeset2decimal(decimal2set((allpath1$colliders)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  colliderpaths.est1 <- c()
+  lencolliderpaths.est1 <- length(allpath1$colliderpaths)
+  if(lencolliderpaths.est1==0) {colliderpaths.est1 <- NULL} else{
+    for (i in 1:lencolliderpaths.est1) 
+    {
+      colliderpaths.est1[i] <-activeset2decimal(decimal2set((allpath1$colliderpaths)[i],max(type12Xindex)),max(max(type12Xindex),9))  
+    }}
+  
+  
+  evaluationresult1 <- evaluation.index(minsetpaths.true,colliders.true,colliderpaths.true,
+                                        minsetpaths.est1,colliders.est1,colliderpaths.est1)
+  pt1vec[kk] <-evaluationresult1$pt;pe1vec[kk] <-evaluationresult1$pe 
+}
+
+### the results
+mean(p0.true);mean(p0.est)  ## rho_0; omega_0
+mean(p1.true);mean(p1.est)  ## rho_1; omega_1
+mean(pt0vec);mean(pe0vec,na.rm = T) ## tilde{rho}_0; tilde{omega}_0
+mean(pt1vec);mean(pe1vec,na.rm = T)## tilde{rho}_1; tilde{omega}_1
+
+
+
+
+
+
+
